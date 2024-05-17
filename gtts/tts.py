@@ -121,8 +121,8 @@ class gTTS:
             ]
         ).run,
         timeout=None,
+        proxies={},
     ):
-
         # Debug
         for k, v in dict(locals()).items():
             if k == "self":
@@ -163,6 +163,9 @@ class gTTS:
         self.tokenizer_func = tokenizer_func
 
         self.timeout = timeout
+
+        # Proxies
+        self.proxies = proxies
 
     def _tokenize(self, text):
         # Pre-clean
@@ -268,7 +271,7 @@ class gTTS:
                     r = s.send(
                         request=pr,
                         verify=False,
-                        proxies=urllib.request.getproxies(),
+                        proxies=self.proxies,
                         timeout=self.timeout,
                     )
 
