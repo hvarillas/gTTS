@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
+import asyncio
 import base64
+from itertools import islice
 import json
 import logging
 import re
 import urllib
 
 import requests
+import aiohttp
+from aiohttp import ClientSession
 
 from gtts.lang import _fallback_deprecated_lang, tts_langs
 from gtts.tokenizer import Tokenizer, pre_processors, tokenizer_cases
@@ -89,13 +93,14 @@ class gTTS:
 
     """
 
-    GOOGLE_TTS_MAX_CHARS = 100  # Max characters the Google TTS API takes at a time
+    GOOGLE_TTS_MAX_CHARS = 200  # Max characters the Google TTS API takes at a time
     GOOGLE_TTS_HEADERS = {
         "Referer": "http://translate.google.com/",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/47.0.2526.106 Safari/537.36",
         "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+        "Accept-Language": "es-MX,es;q=0.8,en-US;q=0.5,en;q=0.3",
     }
     GOOGLE_TTS_RPC = "jQ1olc"
 
@@ -121,7 +126,9 @@ class gTTS:
             ]
         ).run,
         timeout=None,
-        proxies={},
+        # proxies={},
+        proxy="",
+        chunk=10,
     ):
         # Debug
         for k, v in dict(locals()).items():
@@ -165,7 +172,11 @@ class gTTS:
         self.timeout = timeout
 
         # Proxies
-        self.proxies = proxies
+        # self.proxies = proxies
+        self.proxy = proxy
+
+        # chunk
+        self.chunk = chunk
 
     def _tokenize(self, text):
         # Pre-clean
@@ -218,25 +229,20 @@ class gTTS:
 
             log.debug("data-%i: %s", idx, data)
 
-            # Request
-            r = requests.Request(
-                method="POST",
-                url=translate_url,
-                data=data,
-                headers=self.GOOGLE_TTS_HEADERS,
-            )
-
-            # Prepare request
-            prepared_requests.append(r.prepare())
+            prepared_requests.append(data)
 
         return prepared_requests
 
     def _package_rpc(self, text):
         parameter = [text, self.lang, self.speed, "null"]
+        # print(f"1 - {parameter}")
         escaped_parameter = json.dumps(parameter, separators=(",", ":"))
+        # print(f"2 - {escaped_parameter}")
 
         rpc = [[[self.GOOGLE_TTS_RPC, escaped_parameter, None, "generic"]]]
+        # print(f"3 - {rpc}")
         espaced_rpc = json.dumps(rpc, separators=(",", ":"))
+        # print(f"4 - {espaced_rpc}")
         return "f.req={}&".format(urllib.parse.quote(espaced_rpc))
 
     def get_bodies(self):
@@ -247,63 +253,47 @@ class gTTS:
         """
         return [pr.body for pr in self._prepare_requests()]
 
-    def stream(self):
+    async def stream(self):
         """Do the TTS API request(s) and stream bytes
 
         Raises:
             :class:`gTTSError`: When there's an error with the API request.
 
         """
-        # When disabling ssl verify in requests (for proxies and firewalls),
-        # urllib3 prints an insecure warning on stdout. We disable that.
-        try:
-            requests.packages.urllib3.disable_warnings(
-                requests.packages.urllib3.exceptions.InsecureRequestWarning
-            )
-        except:
-            pass
-
+        translate_url = _translate_url(
+            tld=self.tld, path="_/TranslateWebserverUi/data/batchexecute"
+        )
+        params = {"rpcids": "jQ1olc", "hl": "es-419"}
         prepared_requests = self._prepare_requests()
-        for idx, pr in enumerate(prepared_requests):
-            try:
-                with requests.Session() as s:
-                    # Send request
-                    r = s.send(
-                        request=pr,
-                        verify=False,
-                        proxies=self.proxies,
-                        timeout=self.timeout,
+        async with aiohttp.ClientSession(headers=self.GOOGLE_TTS_HEADERS) as session:
+            it_data = iter(prepared_requests)
+            while True:
+                slice_data = list(islice(it_data, self.chunk))
+                if not slice_data:
+                    break
+                print(f"Chunk len: {self.chunk}")
+                results = await asyncio.gather(
+                    *(
+                        session.request(
+                            method="POST",
+                            url=translate_url,
+                            params=params,
+                            data=data,
+                            timeout=self.timeout,
+                            proxy=self.proxy,
+                        )
+                        for data in prepared_requests
                     )
-
-                log.debug("headers-%i: %s", idx, r.request.headers)
-                log.debug("url-%i: %s", idx, r.request.url)
-                log.debug("status-%i: %s", idx, r.status_code)
-
-                r.raise_for_status()
-            except requests.exceptions.HTTPError as e:  # pragma: no cover
-                # Request successful, bad response
-                log.debug(str(e))
-                raise gTTSError(tts=self, response=r)
-            except requests.exceptions.RequestException as e:  # pragma: no cover
-                # Request failed
-                log.debug(str(e))
-                raise gTTSError(tts=self)
-
-            # Write
-            for line in r.iter_lines(chunk_size=1024):
-                decoded_line = line.decode("utf-8")
-                if "jQ1olc" in decoded_line:
-                    audio_search = re.search(r'jQ1olc","\[\\"(.*)\\"]', decoded_line)
+                )
+                for r in results:
+                    # Write
+                    content = await r.text()
+                    audio_search = re.search(r'jQ1olc","\[\\"(.*)\\"]', content)
                     if audio_search:
                         as_bytes = audio_search.group(1).encode("ascii")
                         yield base64.b64decode(as_bytes)
-                    else:
-                        # Request successful, good response,
-                        # no audio stream in response
-                        raise gTTSError(tts=self, response=r)
-            log.debug("part-%i created", idx)
 
-    def write_to_fp(self, fp):
+    async def write_to_fp(self, fp):
         """Do the TTS API request(s) and write bytes to a file-like object.
 
         Args:
@@ -316,15 +306,14 @@ class gTTS:
         """
 
         try:
-            for idx, decoded in enumerate(self.stream()):
+            async for decoded in self.stream():
                 fp.write(decoded)
-                log.debug("part-%i written to %s", idx, fp)
         except (AttributeError, TypeError) as e:
             raise TypeError(
                 "'fp' is not a file-like object or it does not take bytes: %s" % str(e)
             )
 
-    def save(self, savefile):
+    async def save(self, savefile):
         """Do the TTS API request and write result to file.
 
         Args:
@@ -335,7 +324,7 @@ class gTTS:
 
         """
         with open(str(savefile), "wb") as f:
-            self.write_to_fp(f)
+            await self.write_to_fp(f)
             f.flush()
             log.debug("Saved to %s", savefile)
 
