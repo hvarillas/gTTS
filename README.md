@@ -19,7 +19,7 @@ Write spoken `mp3` data to a file, a file-like object (bytestring) for further a
 
 ### Installation
 
-    $ pip install gTTS
+    $ pip install git+https://github.com/hvarillas/gTTS
 
 ### Quickstart
 

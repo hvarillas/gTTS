@@ -32,6 +32,7 @@ classifiers = [
 dependencies = [
     "requests >=2.27, <3",  # https://docs.python-requests.org/en/latest/community/updates/
     "click >=7.1, <8.2",    # https://click.palletsprojects.com/en/latest/changes/
+    "aiohttp >=3.9.5",
 ]
 
 # TODO: release-please [yet] doesn't support dynamic version for pyproject.toml
