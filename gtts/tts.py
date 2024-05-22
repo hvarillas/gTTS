@@ -271,7 +271,6 @@ class gTTS:
                 slice_data = list(islice(it_data, self.chunk))
                 if not slice_data:
                     break
-                print(f"Chunk len: {self.chunk}")
                 results = await asyncio.gather(
                     *(
                         session.request(
